@@ -34,7 +34,7 @@ roles:
     phase: P5b
     enabled: true
     output: .ai/temp/plan.md
-  Go:
+  Engineer:
     phase: P6
     enabled: true
     output: .ai/records/go-engineer/

@@ -47,10 +47,10 @@ def load_app_config(
     config_dir = root_path / "configs"
     system_payload = _read_yaml(config_dir / "system.yaml")
 
-    runtime_payload = system_payload.get("runtime", {})
-    api_payload = system_payload.get("api", {})
-    cli_payload = system_payload.get("cli", {})
-    observability_payload = system_payload.get("observability", {})
+    runtime_payload = system_payload.get("runtime") or {}
+    api_payload = system_payload.get("api") or {}
+    cli_payload = system_payload.get("cli") or {}
+    observability_payload = system_payload.get("observability") or {}
 
     runtime = RuntimeConfig(
         default_timeout_seconds=int(timeout_override or runtime_payload.get("default_timeout_seconds", 30)),

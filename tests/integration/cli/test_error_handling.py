@@ -157,5 +157,62 @@ class ConfigBlockingTest(unittest.TestCase):
         self.assertEqual(payload["error"]["type"], "config_invalid")
 
 
+class TenantIsolationCLITest(unittest.TestCase):
+    """CLI-level test: tenant-a work orders are invisible to tenant-b."""
+
+    def test_tenant_b_cannot_see_tenant_a_work_orders(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict(os.environ, {"DE_STATE_DIR": temp_dir}, clear=False):
+                # Create a work order under tenant-a
+                create_stdout = io.StringIO()
+                with redirect_stdout(create_stdout):
+                    create_code = main(
+                        [
+                            "--json",
+                            "--tenant",
+                            "tenant-a",
+                            "work-order",
+                            "create",
+                            "--employee",
+                            "sales-assistant",
+                            "--input",
+                            "Confidential tenant-a task",
+                        ]
+                    )
+                self.assertEqual(create_code, 0)
+                created = json.loads(create_stdout.getvalue())
+                work_order_id = created["data"]["work_order"]["work_order_id"]
+
+                # tenant-a can see its own work order
+                get_a_stdout = io.StringIO()
+                with redirect_stdout(get_a_stdout):
+                    get_a_code = main(
+                        ["--json", "--tenant", "tenant-a", "work-order", "get", work_order_id]
+                    )
+                self.assertEqual(get_a_code, 0)
+
+                # tenant-b list must not contain tenant-a's work order
+                list_b_stdout = io.StringIO()
+                with redirect_stdout(list_b_stdout):
+                    list_b_code = main(
+                        ["--json", "--tenant", "tenant-b", "work-order", "list"]
+                    )
+                self.assertEqual(list_b_code, 0)
+                list_b_payload = json.loads(list_b_stdout.getvalue())
+                listed_ids = [
+                    wo["work_order_id"]
+                    for wo in list_b_payload["data"]["work_orders"]
+                ]
+                self.assertNotIn(work_order_id, listed_ids)
+
+                # tenant-b get must not return tenant-a's work order
+                get_b_stdout = io.StringIO()
+                with redirect_stdout(get_b_stdout):
+                    get_b_code = main(
+                        ["--json", "--tenant", "tenant-b", "work-order", "get", work_order_id]
+                    )
+                self.assertNotEqual(get_b_code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

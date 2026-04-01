@@ -1,8 +1,8 @@
-# cliagent — Codex CLI 多角色工作流
+# digital-employee — Python 数字员工平台多角色工作流
 
 > 将本文件放在项目根目录的 `AGENTS.md`。
-> 本文件基于多角色顺序交付 + Gate 审批 + 文件化交接思想，开发适合 Go CLI 项目的流程。
-> 后续实现 `cliagent` 时，本文档是人类与 AI 协作协议；代码实现只以 `docs/cliagent-go-design.md` 为技术基线。
+> 本文件基于多角色顺序交付 + Gate 审批 + 文件化交接思想，开发适合 Python 数字员工平台的流程。
+> 本文档是人类与 AI 协作协议；代码实现只以 `docs/cliagent-go-design.md` 为技术基线。
 
 ---
 
@@ -29,9 +29,9 @@
 | P2 | 架构师 | `架构:` / `arch:` |
 | P3 | CLI 体验设计师 | `命令:` / `cmd:` |
 | P4 | 项目经理 | `拆解:` / `task:` |
-| P5a | Go 工程师·包结构契约 | `包契:` / `pkg:` |
+| P5a | 工程师·包结构契约 | `包契:` / `pkg:` |
 | P5b | 技术方案 | `方案:` / `plan:` |
-| P6 | Go 工程师·实现 | `实现:` / `impl:` |
+| P6 | Python 工程师·实现 | `实现:` / `impl:` |
 | P7 | 评审工程师 | `评审:` / `rev:` |
 | P8 | QA 工程师 | `验收:` / `qa:` |
 | P9 | 发布工程师 | `发布:` / `ship:` |
@@ -58,16 +58,15 @@
 └── state/                       # CLI 运行状态，如 gate、session、resume 信息
 
 docs/
-└── cliagent-go-design.md        # Go CLI 开发设计文档
+└── cliagent-go-design.md        # Python 数字员工平台设计文档
 ```
 
 ### 推荐源码目录
 
 ```text
-cmd/cliagent/
-internal/
-pkg/
-testdata/
+src/digital_employee/
+tests/
+configs/
 docs/
 ```
 
@@ -115,9 +114,9 @@ docs/
 | `{temp}/architect.md` | P2 架构师 |
 | `{temp}/cli-spec.md` | P3 CLI 体验设计师 |
 | `{temp}/wbs.md` | P4 项目经理 |
-| `{temp}/package-plan.md` | P5a Go 包结构契约 |
+| `{temp}/package-plan.md` | P5a 包结构契约 |
 | `{temp}/plan.md` | P5b 技术方案 |
-| `.ai/records/go-engineer/` 下存在日志 | P6 Go 实现进行中或已完成 |
+| `.ai/records/go-engineer/` 下存在日志 | P6 实现进行中或已完成 |
 | `{reports}/review/review-report-*.md` | P7 评审 |
 | `{reports}/qa-report-*.md` | P8 QA |
 | `{reports}/release/release-guide-*.md` | P9 发布 |
@@ -133,9 +132,9 @@ docs/
 | P2   | 架构师             | ⏳ 下一步   | .ai/temp/architect.md                       |
 | P3   | CLI 体验设计师     | ⏳ 待执行   | .ai/temp/cli-spec.md                        |
 | P4   | 项目经理           | ⏳ 待执行   | .ai/temp/wbs.md                             |
-| P5a  | Go·包结构契约      | ⏳ 待执行   | .ai/temp/package-plan.md                    |
+| P5a  | 包结构契约          | ⏳ 待执行   | .ai/temp/package-plan.md                    |
 | P5b  | 技术方案           | ⏳ 待执行   | .ai/temp/plan.md                            |
-| P6   | Go 工程师·实现     | ⏳ 待执行   | 源代码 + .ai/records/go-engineer/           |
+| P6   | Python 工程师·实现 | ⏳ 待执行   | 源代码 + .ai/records/go-engineer/           |
 | P7   | 评审工程师         | ⏳ 待执行   | .ai/reports/review/review-report-{v}.md     |
 | P8   | QA 工程师          | ⏳ 待执行   | .ai/reports/qa-report-{v}.md                |
 | P9   | 发布工程师         | ⏳ 待执行   | .ai/reports/release/release-guide-{v}.md    |
@@ -241,7 +240,7 @@ docs/
 
 **触发词：** `命令:` / `cmd:`
 
-你负责命令体验，不写 Go 代码。
+你负责命令体验，不写实现代码。
 
 **输入：**
 
@@ -304,7 +303,7 @@ docs/
 
 ---
 
-## P5a · Go 工程师 · 包结构契约
+## P5a · 工程师 · 包结构契约
 
 **触发词：** `包契:` / `pkg:`
 
@@ -372,11 +371,11 @@ docs/
 
 ---
 
-## P6 · Go 工程师 · 实现
+## P6 · Python 工程师 · 实现
 
 **触发词：** `实现:` / `impl:`
 
-你负责编写 Go 代码并补齐测试，严格遵守前序阶段产出。
+你负责编写 Python 代码并补齐测试，严格遵守前序阶段产出。
 
 **输入：**
 
@@ -388,14 +387,13 @@ docs/
 
 **实现规则：**
 
-- 默认 Go 1.23+ 语法与工具链
-- `cmd/` 只做命令组装；业务逻辑进 `internal/`
-- 所有跨层调用传递 `context.Context`
-- 错误需保留上下文，使用 `fmt.Errorf(... %w ...)`
-- 日志使用 `log/slog`
+- 默认 Python 3.12+ 语法
+- `api/` 只做命令组装；业务逻辑进 `application/`，执行逻辑进 `runtime/`
+- 使用 `from __future__ import annotations` + 标准库类型注解
+- 错误统一使用领域错误层（`DigitalEmployeeError` 及子类）
 - 配置优先级固定为：flag > env > config file > default
 - 标准输出只放结果；诊断信息走标准错误
-- 所有新增代码执行 `gofmt`
+- 优先标准库，唯一运行时依赖为 `pyyaml>=6`
 - 重要行为必须有单元测试；命令输出优先使用 Golden Test
 
 **任务日志：**
@@ -501,7 +499,7 @@ docs/
 **必须包含：**
 
 1. 发布前检查清单
-2. 构建矩阵：OS / ARCH / Go 版本
+2. 构建矩阵：OS / ARCH / Python 版本
 3. 打包与校验和策略
 4. Homebrew / Scoop / 压缩包分发方案
 5. 配置与凭证说明
@@ -526,7 +524,7 @@ docs/
 - 不写“好的”“收到”“综合考虑”等空话
 - 每一条决策都要能追溯到需求、架构、CLI 规范或代码事实
 - 需要用户补充信息时，先提最少的问题，不要盲目扩写
-- 文档与代码命名统一使用 `kebab-case` 文件名、Go 标识符遵循官方规范
+- 文档与配置文件使用 `kebab-case`；Python 模块使用 `snake_case`
 - 文档协议可写在 `AGENTS.md` 中，但机器可消费配置必须落到结构化文件，不能依赖解析自由文本 Markdown
 
 ## 大文件写入规则

@@ -76,8 +76,18 @@
 - 修复 background `_execute` 的 metadata 同步常量引用错误，恢复 `session tail --follow` 与后台 runner 主链稳定性
 - stale 测试辅助已抽到 `tests/integration/cli/support.py`，并在 reclaim 用例里等待 work-order 完整收尾后再注入 stale 状态，消除全量跑时序抖动
 
+## 2026-04-01 第七轮补充（QA 阻塞项回归修复）
+
+- 修复 `infra/config/loader.py` 中 YAML null section 导致 `AttributeError` 的问题（`system_payload.get("runtime", {})` 改为 `system_payload.get("runtime") or {}`）
+- 新增 CLI 集成测试 `test_tenant_b_cannot_see_tenant_a_work_orders`，覆盖 QA-004 租户隔离在 CLI 层面的验证
+- 新增单元测试 `test_null_yaml_sections_do_not_crash`，覆盖 YAML null section 边界情况
+- 确认前次 4 个 P0 阻塞项（QA-001 ~ QA-004）全部修复
+- 生成回归评审报告 `review-report-20260401-v2.md`
+- 生成回归 QA 报告 `qa-report-20260401-v2.md`，结论：Go
+- 生成回归发布指南 `release-guide-20260401-v2.md`
+
 ## 验证记录
 
 - `python3 -m unittest discover -s tests -p 'test_*.py'`
-  - `Ran 85 tests`
+  - `Ran 87 tests`
   - `OK`
