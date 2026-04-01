@@ -24,7 +24,7 @@ class ProviderRouterTest(unittest.TestCase):
         with self.assertRaises(ProviderNotFoundError):
             router.resolve("missing")
 
-    def test_unavailable_provider_raises_on_complete(self) -> None:
+    def test_openai_provider_requires_credentials(self) -> None:
         provider = build_provider("openai", model="gpt-5.4", timeout_seconds=30)
         with self.assertRaises(ProviderExecutionError):
             asyncio.run(

@@ -19,20 +19,25 @@ class FileSessionRepository:
     def save(self, record: SessionRecord) -> SessionRecord:
         path = self._path_for(record.session.session_id)
         with _FileLock(path.with_suffix(".lock")):
-            path.write_text(json.dumps(record.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+            payload = json.dumps(record.to_dict(), indent=2, sort_keys=True)
+            temp_path = path.with_suffix(".tmp")
+            temp_path.write_text(payload, encoding="utf-8")
+            temp_path.replace(path)
         return record
 
     def get(self, session_id: str) -> SessionRecord | None:
         path = self._path_for(session_id)
-        if not path.exists():
-            return None
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        with _FileLock(path.with_suffix(".lock")):
+            if not path.exists():
+                return None
+            payload = json.loads(path.read_text(encoding="utf-8"))
         return SessionRecord.from_dict(payload)
 
     def list_all(self) -> list[SessionRecord]:
         records: list[SessionRecord] = []
         for path in sorted(self._session_dir.glob("*.json")):
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            with _FileLock(path.with_suffix(".lock")):
+                payload = json.loads(path.read_text(encoding="utf-8"))
             records.append(SessionRecord.from_dict(payload))
         return sorted(records, key=lambda item: item.session.started_at, reverse=True)
 

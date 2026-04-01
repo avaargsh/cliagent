@@ -94,6 +94,8 @@ def build_provider_router(config: LoadedConfig) -> ProviderRouter:
             provider_name=provider.name,
             model=provider.model,
             timeout_seconds=provider.timeout_seconds,
+            max_output_tokens=provider.max_output_tokens,
+            api_key_env=provider.api_key_env,
         )
         for name, provider in config.providers.items()
     }
@@ -119,6 +121,8 @@ def build_runtime_bundle(config: LoadedConfig, approval_repo: ApprovalRepository
                 provider_name=provider.name,
                 model=provider.model,
                 timeout_seconds=provider.timeout_seconds,
+                max_output_tokens=provider.max_output_tokens,
+                api_key_env=provider.api_key_env,
             )
             for name, provider in config.providers.items()
         },
@@ -179,6 +183,8 @@ def build_runtime_cell(
                 provider_name=provider.name,
                 model=provider.model,
                 timeout_seconds=provider.timeout_seconds,
+                max_output_tokens=provider.max_output_tokens,
+                api_key_env=provider.api_key_env,
             )
             for name, provider in config.providers.items()
         },

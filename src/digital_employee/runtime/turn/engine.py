@@ -166,6 +166,7 @@ class TurnEngine:
                 metadata=dict(completion_payload.get("metadata", packet.request_metadata)),
                 turn_index=turn_index,
             )
+            structured_tool_calls = self._ensure_tool_call_ids(last_result.tool_calls, turn_index=turn_index)
 
             snapshot = self._budget_controller.consume(
                 budget,
@@ -195,16 +196,19 @@ class TurnEngine:
                 payload={
                     "provider": provider_name,
                     "usage": dict(last_result.usage),
-                    "tool_calls": list(last_result.tool_calls),
+                    "tool_calls": list(structured_tool_calls),
                 },
             )
+            assistant_metadata = {
+                "provider": provider_name,
+                "turn_index": turn_index,
+            }
+            if structured_tool_calls:
+                assistant_metadata["tool_calls"] = list(structured_tool_calls)
             session.add_message(
                 "assistant",
                 last_result.text,
-                {
-                    "provider": provider_name,
-                    "turn_index": turn_index,
-                },
+                assistant_metadata,
             )
             self._session_recorder.publish_progress(session, events, progress_callback)
             self._dispatch(
@@ -214,16 +218,16 @@ class TurnEngine:
                     "provider": provider_name,
                     "text": last_result.text,
                     "usage": dict(last_result.usage),
-                    "tool_calls": list(last_result.tool_calls),
+                    "tool_calls": list(structured_tool_calls),
                     "turn_index": turn_index,
                 },
                 raise_if_blocked=False,
             )
 
-            if not last_result.tool_calls:
+            if not structured_tool_calls:
                 break
 
-            for raw_call in last_result.tool_calls:
+            for raw_call in structured_tool_calls:
                 tool_call = self._action_interpreter.normalize_tool_call(raw_call)
                 if tool_call.tool_name not in profile.allowed_tools:
                     raise ToolNotAllowedError(profile.employee_id, tool_call.tool_name)
@@ -315,6 +319,7 @@ class TurnEngine:
                     str(observation.payload),
                     {
                         "tool_name": observation.tool_name,
+                        "tool_call_id": str(raw_call.get("tool_call_id") or ""),
                         "status": observation.status,
                         "turn_index": turn_index,
                     },
@@ -415,6 +420,18 @@ class TurnEngine:
         )
         self._approval_repo.create(approval_request)
         return approval_request
+
+    def _ensure_tool_call_ids(self, tool_calls: list[dict[str, Any]], *, turn_index: int) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for index, item in enumerate(tool_calls, start=1):
+            payload = dict(item)
+            tool_call_id = str(payload.get("tool_call_id") or payload.get("id") or "")
+            if not tool_call_id:
+                tool_name = str(payload.get("tool_name") or payload.get("name") or "tool")
+                tool_call_id = f"call_turn_{turn_index}_{index}_{tool_name.replace(' ', '_')}"
+            payload["tool_call_id"] = tool_call_id
+            normalized.append(payload)
+        return normalized
 
     def _find_pending_request(
         self,

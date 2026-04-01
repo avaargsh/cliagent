@@ -49,7 +49,7 @@ class ProviderCatalogFactoryTest(unittest.TestCase):
         second = factory.resolve("mock")
         self.assertIs(first, second)
 
-    def test_factory_uses_unavailable_provider_for_unimplemented_slot(self) -> None:
+    def test_factory_builds_openai_provider_that_requires_credentials(self) -> None:
         catalog = ProviderCatalog(
             {
                 "openai": ProviderSlot(

@@ -9,6 +9,7 @@ from digital_employee.domain.errors import ProviderExecutionError
 from digital_employee.providers.catalog import ProviderCatalog, ProviderSlot
 from digital_employee.providers.mock_provider import MockProvider
 from digital_employee.providers.models import CompletionRequest, CompletionResult
+from digital_employee.providers.openai_provider import OpenAIProvider
 
 
 ProviderBuilder = Callable[[], Provider]
@@ -51,4 +52,12 @@ class _UnavailableProvider:
 def _build_default_provider(slot: ProviderSlot) -> Provider:
     if slot.provider_name == "mock":
         return MockProvider(name=slot.provider_name, model=slot.model)
+    if slot.provider_name == "openai":
+        return OpenAIProvider(
+            name=slot.provider_name,
+            model=slot.model,
+            timeout_seconds=slot.timeout_seconds,
+            max_output_tokens=slot.max_output_tokens,
+            api_key_env=slot.api_key_env or "OPENAI_API_KEY",
+        )
     return _UnavailableProvider(slot.provider_name)

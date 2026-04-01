@@ -93,7 +93,7 @@
 7. `replay run`
 8. `doctor`
 9. `version`
-10. Provider：`mock`（`openai` 配置就绪但无实现）
+10. Provider：`mock`、`openai`
 11. 文件仓储 + `fcntl` 并发锁
 12. `RuntimeCell / RuntimeManager`
 13. `TurnEngine` 多回合执行 + `TurnPipeline`
@@ -107,12 +107,11 @@
 ### 4.2 延后到后续版本
 
 1. REST API 端到端
-2. `openai` provider 实现
-3. WebSocket 实时事件推送
-4. 数据库持久化（PostgreSQL / Redis）
-5. Windows 平台支持
-6. `--profile` 分层配置加载
-7. 正式 SDK 包（`digital_employee_sdk`）
+2. WebSocket 实时事件推送
+3. 数据库持久化（PostgreSQL / Redis）
+4. Windows 平台支持
+5. `--profile` 分层配置加载
+6. 正式 SDK 包（`digital_employee_sdk`）
 
 ## 5. 命令模型与协议
 
@@ -168,6 +167,7 @@ dectl
 - 诊断、警告、调试写入 `stderr`
 - `--json` 时，`stdout` 只能输出单个 JSON 对象
 - `--jsonl` 仅对流式命令（`session tail`、`work-order watch`）有效
+- 全局参数（如 `--json`、`--jsonl`、`--tenant`）需写在资源命令前
 
 统一机读包裹：
 
@@ -311,7 +311,8 @@ class RuntimeCell:
 │   │   ├── {session_id}.json
 │   │   └── {session_id}.lock
 │   ├── approvals.json
-│   ├── events/
+│   ├── events.jsonl
+│   ├── events.lock
 │   └── projections/
 └── _default/
     └── (same structure)
@@ -381,6 +382,7 @@ configs/
 2. 集成测试：CLI 端到端、错误协议、租户隔离、后台执行
 3. Golden Test：`config-show-json.json`
 4. Mock Provider：保证离线和 CI 可重复
+5. 当前回归基线：`python3 -m unittest discover -s tests -p 'test_*.py'`，`Ran 98 tests`
 
 ### 10.3 发布
 

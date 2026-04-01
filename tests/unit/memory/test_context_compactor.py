@@ -34,6 +34,36 @@ class ContextCompactorTest(unittest.TestCase):
         self.assertEqual(len(prepared.recent_messages), 2)
         self.assertEqual(session.compact_state.strategy, "autocompact")
 
+    def test_snip_preserves_empty_assistant_message_with_tool_calls(self) -> None:
+        session = ConversationSession(session_id="s1", work_order_id="wo1")
+        session.messages = [
+            ConversationMessage(
+                role="assistant",
+                content="",
+                metadata={
+                    "tool_calls": [
+                        {
+                            "tool_name": "knowledge-search",
+                            "payload": {"query": "upsell playbook"},
+                            "tool_call_id": "call_1",
+                        }
+                    ]
+                },
+                token_estimate=0,
+            ),
+            ConversationMessage(
+                role="tool",
+                content='{"matches":["renewal script"]}',
+                metadata={"tool_name": "knowledge-search", "tool_call_id": "call_1"},
+                token_estimate=1,
+            ),
+        ]
+        compactor = ContextCompactor(max_context_tokens=10, recent_message_window=2, compaction_target_tokens=5)
+        trimmed = compactor.snip(session.messages)
+        self.assertEqual(len(trimmed), 2)
+        self.assertEqual(trimmed[0].role, "assistant")
+        self.assertEqual(trimmed[0].metadata["tool_calls"][0]["tool_call_id"], "call_1")
+
 
 if __name__ == "__main__":
     unittest.main()

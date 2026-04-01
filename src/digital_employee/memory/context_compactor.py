@@ -76,7 +76,7 @@ class ContextCompactor:
         trimmed: list[ConversationMessage] = []
         for message in messages:
             content = message.content.strip()
-            if not content:
+            if not content and not self._should_preserve_empty_message(message):
                 continue
             if trimmed:
                 previous = trimmed[-1]
@@ -136,3 +136,8 @@ class ContextCompactor:
         if len(words) <= limit:
             return text
         return " ".join(words[:limit]) + " ..."
+
+    def _should_preserve_empty_message(self, message: ConversationMessage) -> bool:
+        if message.role == "assistant" and message.metadata.get("tool_calls"):
+            return True
+        return False

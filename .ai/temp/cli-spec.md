@@ -33,8 +33,10 @@ dectl
 │   ├── create
 │   ├── get <work-order-id>
 │   ├── list
+│   ├── run <work-order-id>
 │   ├── watch <work-order-id>
 │   ├── cancel <work-order-id>
+│   ├── reclaim <work-order-id>
 │   ├── resume <work-order-id>
 │   └── artifacts <work-order-id>
 ├── approval
@@ -61,7 +63,7 @@ dectl
 - 一级命令按控制对象分组，不按技术模块分组
 - 所有命令都必须支持非交互式运行
 - 所有查询类命令都必须支持稳定 `--json` 输出
-- 所有变更类命令都必须支持幂等键或请求引用
+- `--json/--jsonl/--tenant` 等全局参数必须写在资源命令前（`argparse` 全局参数规则）
 
 ## 3. 子命令用途
 
@@ -75,13 +77,15 @@ dectl
 | `work-order create` | 创建工作单 | 接收自然语言任务或结构化输入，返回工作单 ID |
 | `work-order get` | 查看工作单详情 | 输出状态、当前步骤、负责人、预算、最近事件 |
 | `work-order list` | 检索工作单列表 | 支持按状态、员工、时间、租户、风险等级过滤 |
+| `work-order run` | 执行工作单 | 支持前台执行和 `--background` 后台执行 |
 | `work-order watch` | 观察工作单进度 | 用于流式查看状态迁移、审批等待和工具执行摘要 |
 | `work-order cancel` | 取消执行中的工作单 | 仅终止未完成步骤，不删除审计记录 |
+| `work-order reclaim` | 回收陈旧后台任务 | 仅允许回收 stale background session 对应工作单 |
 | `work-order resume` | 恢复暂停的工作单 | 用于审批通过后恢复，或人工补充信息后继续运行 |
 | `work-order artifacts` | 查看交付物 | 列出文档、附件、导出文件和结构化结果 |
 | `approval list` | 查看待审批项 | 供管理员或业务负责人处理高风险动作 |
 | `approval get` | 查看审批详情 | 输出请求动作、风险说明、上下文摘要和建议决策 |
-| `approval decide` | 批准或驳回审批项 | 必须记录决策人、决策理由和时间 |
+| `approval decide` | 批准或驳回审批项 | 支持 `--resume` 与 `--resume --background` 一步恢复 |
 | `session list` | 查看会话列表 | 支持按工作单、员工、状态过滤 |
 | `session get` | 查看会话摘要 | 输出参与者、开始时间、预算使用和当前阶段 |
 | `session tail` | 实时查看会话事件 | 主要用于调试执行回合和工具观察结果 |
@@ -106,6 +110,9 @@ dectl
 - 位置参数只用于唯一资源定位，例如 `<work-order-id>`、`<approval-id>`、`<session-id>`。
 - 位置参数不允许由环境变量回退替代，避免脚本行为不明确。
 - 与输出相关的选项也遵循同样优先级，例如 `--json` 优先于 `DE_OUTPUT=json`。
+- 当前 CLI 基于 `argparse`，全局参数必须写在资源命令前：
+  - ✅ `dectl --json config show`
+  - ❌ `dectl config show --json`
 
 ### 4.2 建议全局 flags
 
@@ -127,12 +134,14 @@ dectl
 | 环境变量 | 含义 |
 |---|---|
 | `DE_BASE_URL` | 平台 API 地址 |
-| `DE_API_TOKEN` | 控制面访问令牌 |
 | `DE_TENANT` | 默认租户 |
 | `DE_PROFILE` | 默认 profile |
 | `DE_TIMEOUT` | 默认请求超时 |
 | `DE_OUTPUT` | 默认输出格式，`human` 或 `json` |
 | `DE_NO_INPUT` | 默认禁用交互 |
+| `DE_STATE_DIR` | 覆盖状态目录路径 |
+| `OPENAI_API_KEY` | OpenAI provider 密钥 |
+| `OPENAI_BASE_URL` | OpenAI provider 覆盖地址 |
 
 ### 4.4 关键命令参数建议
 
@@ -143,11 +152,16 @@ dectl
   - `--employee <employee-id>`
   - `--input <text>`
   - `--input-file <path>`
-  - `--context-file <path>`
-  - `--async`
-  - `--priority <p0|p1|p2>`
   - `--budget <amount>`
-  - `--risk-mode <strict|balanced|manual>`
+  - `--coordinated`
+  - `--participant <employee-id>`（可重复）
+
+`work-order run` / `work-order resume`
+
+- args：
+  - `<work-order-id>`
+- flags：
+  - `--background`
 
 `approval decide`
 
@@ -156,7 +170,8 @@ dectl
 - flags：
   - `--decision <approve|reject>`
   - `--reason <text>`
-  - `--comment <text>`
+  - `--resume`
+  - `--background`
 
 `session tail`
 
@@ -180,10 +195,11 @@ dectl
 
 仅允许以下最小交互：
 
-- `work-order create` 在缺少 `--employee` 或 `--input` 时，提示补全
+- `work-order create` 在缺少 `--input` 时提示补全（`--employee` 由参数解析层强制必填）
+- `employee test` 在缺少 `--input` 时提示补全
 - `approval decide` 在缺少 `--decision` 时，提示选择批准或驳回
 - `work-order cancel` 在未传 `--yes` 时，要求确认
-- `session tail` 在 TTY 环境下允许彩色高亮和简易进度提示
+- `work-order reclaim` 在未传 `--yes` 时，要求确认
 
 禁止事项：
 
@@ -291,12 +307,10 @@ Next: dectl approval list --tenant acme
 | `1` | 未分类错误 |
 | `2` | 参数错误或输入校验失败 |
 | `3` | 配置错误 |
-| `4` | 认证或授权失败 |
-| `5` | Provider 调用失败 |
-| `6` | 策略拒绝或审批未完成 |
-| `7` | 资源不存在或状态冲突 |
-| `8` | 超时、取消或中断 |
-| `9` | 外部集成调用失败 |
+| `4` | 权限/策略拒绝（例如工具被拒绝、Hook 阻塞） |
+| `6` | 审批未完成或依赖资源不可用（例如 provider/tool 未注册） |
+| `7` | 资源不存在或状态不允许该操作 |
+| `8` | Provider/Tool/Budget/执行链路失败 |
 | `10` | 内部错误 |
 
 约束：
@@ -307,55 +321,67 @@ Next: dectl approval list --tenant acme
 
 ## 8. 常见使用示例
 
-创建异步工作单：
+创建工作单：
 
 ```bash
-dectl work-order create \
-  --tenant acme \
+dectl --tenant acme --json work-order create \
   --employee sales-assistant \
   --input "给昨天未回复报价的客户生成跟进计划" \
-  --async \
-  --json
+  --budget 12000
+```
+
+后台执行工作单：
+
+```bash
+dectl --tenant acme --json work-order run wo_123 --background
 ```
 
 查看待审批项：
 
 ```bash
-dectl approval list --tenant acme --json
+dectl --tenant acme --json approval list
 ```
 
-批准某个高风险动作：
+批准并在后台恢复：
 
 ```bash
-dectl approval decide ap_123 \
+dectl --tenant acme --json approval decide ap_123 \
   --decision approve \
-  --reason "客户经理已确认内容可发送"
+  --reason "客户经理已确认内容可发送" \
+  --resume \
+  --background
 ```
 
 观察工作单执行过程：
 
 ```bash
-dectl work-order watch wo_123 --jsonl
+dectl --jsonl work-order watch wo_123 --follow
 ```
 
 验证某个数字员工装配：
 
 ```bash
-dectl employee test hr-assistant \
+dectl --tenant acme --json employee test hr-assistant \
   --input-file ./examples/onboarding-task.md \
-  --json
+  --input "请生成入职周计划"
 ```
 
 导出会话审计记录：
 
 ```bash
-dectl session export sess_123 --json
+dectl --json session export sess_123
+```
+
+回放工作单事件时间线：
+
+```bash
+dectl --json replay run wo_123
 ```
 
 诊断环境：
 
 ```bash
-dectl doctor --tenant acme --json
+dectl --tenant acme --json doctor
 ```
 
 ## 9. 错误提示文案规范

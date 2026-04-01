@@ -28,13 +28,15 @@ class FileEventLedgerRepository:
         return events
 
     def list_all(self) -> list[LedgerEvent]:
-        if not self._file_path.exists():
-            return []
+        lock_path = self._file_path.with_suffix(".lock")
         events: list[LedgerEvent] = []
-        for line in self._file_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            events.append(LedgerEvent(**json.loads(line)))
+        with _FileLock(lock_path):
+            if not self._file_path.exists():
+                return []
+            for line in self._file_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                events.append(LedgerEvent(**json.loads(line)))
         return events
 
     def list_for_session(self, session_id: str) -> list[LedgerEvent]:

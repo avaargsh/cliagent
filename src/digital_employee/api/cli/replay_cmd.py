@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from digital_employee.api.cli.common import CommandFailure
-
 
 def register(subparsers) -> None:
     parser = subparsers.add_parser("replay", help="Replay execution events.")
@@ -11,8 +9,8 @@ def register(subparsers) -> None:
 
     run_parser = replay_subparsers.add_parser("run", help="Replay a work order.")
     run_parser.add_argument("work_order_id")
-    run_parser.set_defaults(handler=handle_not_implemented, command_name="replay run")
+    run_parser.set_defaults(handler=handle_run, command_name="replay run")
 
 
-def handle_not_implemented(args, context):
-    raise CommandFailure(1, "not_implemented", f"{args.command_name} is not implemented yet")
+def handle_run(args, context):
+    return context.queries.run_replay(args.work_order_id)

@@ -14,6 +14,7 @@ from digital_employee.application.use_cases import (
     config_use_cases,
     doctor_use_cases,
     employee_use_cases,
+    replay_use_cases,
     session_use_cases,
     tool_use_cases,
 )
@@ -160,3 +161,6 @@ class QueryFacade:
 
     def get_approval(self, approval_id: str) -> CommandResult:
         return approval_use_cases.get_approval(self.deps, approval_id)
+
+    def run_replay(self, work_order_id: str) -> CommandResult:
+        return replay_use_cases.replay_work_order(self.deps, work_order_id)

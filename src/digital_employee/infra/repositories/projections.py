@@ -19,20 +19,25 @@ class FileSessionProjectionRepository:
     def save(self, projection: SessionProjection) -> SessionProjection:
         path = self._path_for(projection.session_id)
         with _FileLock(path.with_suffix(".lock")):
-            path.write_text(json.dumps(projection.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+            payload = json.dumps(projection.to_dict(), indent=2, sort_keys=True)
+            temp_path = path.with_suffix(".tmp")
+            temp_path.write_text(payload, encoding="utf-8")
+            temp_path.replace(path)
         return projection
 
     def get(self, session_id: str) -> SessionProjection | None:
         path = self._path_for(session_id)
-        if not path.exists():
-            return None
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        with _FileLock(path.with_suffix(".lock")):
+            if not path.exists():
+                return None
+            payload = json.loads(path.read_text(encoding="utf-8"))
         return SessionProjection.from_dict(payload)
 
     def list_all(self) -> list[SessionProjection]:
         projections: list[SessionProjection] = []
         for path in sorted(self._projection_dir.glob("*.json")):
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            with _FileLock(path.with_suffix(".lock")):
+                payload = json.loads(path.read_text(encoding="utf-8"))
             projections.append(SessionProjection.from_dict(payload))
         return sorted(projections, key=lambda item: item.started_at, reverse=True)
 

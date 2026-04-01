@@ -10,6 +10,7 @@ from digital_employee.providers.catalog import ProviderCatalog
 from digital_employee.providers.factory import ProviderFactory
 from digital_employee.providers.mock_provider import MockProvider
 from digital_employee.providers.models import CompletionRequest, CompletionResult
+from digital_employee.providers.openai_provider import OpenAIProvider
 
 LegacyProviderFactoryFn = Callable[[], Provider]
 
@@ -63,8 +64,22 @@ class _UnavailableProvider:
         )
 
 
-def build_provider(provider_name: str, *, model: str, timeout_seconds: int) -> Provider:
-    del timeout_seconds
+def build_provider(
+    provider_name: str,
+    *,
+    model: str,
+    timeout_seconds: int,
+    max_output_tokens: int = 1024,
+    api_key_env: str = "",
+) -> Provider:
     if provider_name == "mock":
         return MockProvider(name=provider_name, model=model)
+    if provider_name == "openai":
+        return OpenAIProvider(
+            name=provider_name,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            max_output_tokens=max_output_tokens,
+            api_key_env=api_key_env or "OPENAI_API_KEY",
+        )
     return _UnavailableProvider(provider_name)

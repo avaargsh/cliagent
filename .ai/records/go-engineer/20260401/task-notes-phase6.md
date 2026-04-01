@@ -86,8 +86,66 @@
 - 生成回归 QA 报告 `qa-report-20260401-v2.md`，结论：Go
 - 生成回归发布指南 `release-guide-20260401-v2.md`
 
+## 2026-04-01 第八轮补充（OpenAI Provider 落地）
+
+- 新增 `src/digital_employee/providers/openai_provider.py` 的正式接线路径，并把 `bootstrap/factories.py`、`providers/catalog.py`、`providers/factory.py`、`providers/router.py` 的 provider slot 参数扩展到 `max_output_tokens` 和 `api_key_env`
+- `OpenAIProvider` 现在使用官方 chat completions 工具调用载荷，系统指令映射为 `developer` message，并把输出 token 上限写入 `max_completion_tokens`
+- 响应解析补齐 `content` 数组文本片段拼接，工具调用参数仍按 JSON 解析回内部 `tool_calls`
+- `tests/unit/providers/test_openai_provider.py` 改为 mock `urllib.request.urlopen`，不再依赖本地监听端口，避免沙箱和 CI 环境下的 bind 失败
+- 补充 OpenAI provider 的成功、tool call、HTTP 错误、连接错误回归用例，并同步修正文档中“openai 配置就绪但无实现”的过期描述
+
+## 2026-04-01 第九轮补充（评审阻塞项修复）
+
+- `OpenAIProvider.complete()` 改为通过 `asyncio.to_thread()` 执行阻塞式 HTTP 请求，避免在 `async` 边界内直接卡住事件循环
+- `OpenAIProvider` 现在优先消费 `recent_context` 和 `context_compaction.summary`，按结构化消息重建 provider 请求，不再把工具结果伪装成新的 `user` 文本
+- `TurnEngine` 现在会为每个 tool call 补齐稳定 `tool_call_id`，并把 tool call 元数据写入 assistant/tool session message，便于下一回合恢复真实工具链
+- `ContextCompactor.snip()` 现在会保留“空文本但带 tool_calls”的 assistant 消息，避免上下文压缩阶段丢失 OpenAI 工具回合
+- 新增 `TurnEngine + OpenAIProvider` 两回合主链测试，覆盖 `tool call -> tool executed -> second completion` 的结构化历史重放
+- 新增 provider 非阻塞测试和 compactor 回归测试，覆盖本轮两个评审阻塞项
+
 ## 验证记录
 
+- `python3 -m unittest tests.unit.providers.test_openai_provider tests.unit.providers.test_router tests.unit.providers.test_catalog_factory`
+- `Ran 13 tests`
+- `OK`
+- `python3 -m unittest tests.unit.providers.test_openai_provider tests.unit.runtime.test_turn_engine tests.unit.runtime.test_turn_pipeline tests.unit.memory.test_context_compactor tests.unit.providers.test_router tests.unit.providers.test_catalog_factory`
+- `Ran 28 tests`
+- `OK`
 - `python3 -m unittest discover -s tests -p 'test_*.py'`
-  - `Ran 87 tests`
+  - `Ran 96 tests`
   - `OK`
+
+## 2026-04-01 第十轮补充（产品化推进）
+
+- `session/projection` 文件仓储改为“锁内临时文件写入 + replace”原子落盘，避免并发写入期间读取到半写状态
+- `events` 读取侧补锁，避免 `watch/tail/replay` 在 ledger 追加期间读取不一致快照
+- `work-order watch --follow` 追加后台 runner 退出等待逻辑；在同进程模式下会 `waitpid(WNOHANG)` 回收已退出子进程，修复背景恢复链路测试偶发挂起/清理失败
+- `replay run` 从占位改为可用：支持按 `work-order` 回放 ledger 时间线并返回结构化摘要
+- 新增 `application/use_cases/replay_use_cases.py` 与 `tests/integration/cli/test_replay_commands.py`
+- `bootstrap/factories.py` 在 runtime bundle / runtime cell 构建路径中补齐 `max_output_tokens` 和 `api_key_env` 透传，避免 openai 配置在部分路径被静默降级
+
+## 第十轮验证记录
+
+- `PYTHONPATH=src python3 -m unittest tests.integration.cli.test_replay_commands -v`
+  - `Ran 2 tests`
+  - `OK`
+- `python3 -m unittest tests.integration.cli.test_approval_commands.CLIApprovalCommandsTest.test_approval_decide_can_auto_resume_background` 循环 20 次
+  - `failures=0/20`
+- `PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*.py'`
+  - `Ran 98 tests`
+  - `OK`
+- 全量回归循环 5 次：
+  - `total_failures=0/5`
+
+## 2026-04-01 第十一轮补充（文档对齐与阶段推进）
+
+- 更新 `.ai/temp/cli-spec.md`，对齐当前 CLI 事实：
+  - 补充 `work-order run/reclaim`
+  - 更新 `approval decide` 的 `--resume/--background` 语义
+  - 修正示例中全局参数顺序（统一前置）
+  - 删除未实现参数示例（如 `--async`、`--priority`、`--context-file`）
+- 更新 `.ai/temp/test-cases.md` 与 `.ai/temp/test-result.md` 到 `v4` 基线，记录 `98` 测试与稳定性回归结果
+- 新增回归评审报告 `.ai/reports/review/review-report-20260401-v5.md`
+- 新增 QA 报告 `.ai/reports/qa-report-20260401-v4.md`
+- 新增发布指南 `.ai/reports/release/release-guide-20260401-v4.md`
+- 更新 `docs/cliagent-go-design.md`，对齐状态目录结构（`events.jsonl/events.lock`）和当前测试基线

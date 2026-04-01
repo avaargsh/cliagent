@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from datetime import datetime
@@ -69,7 +70,12 @@ def stream_session_record_events(
                 )
 
         sys.stdout.flush()
-        if not follow or record.session.status in {"closed", "paused"}:
+        if not follow:
+            break
+        if record.session.status in {"closed", "paused"}:
+            if _background_runner_active(record):
+                time.sleep(0.05)
+                continue
             break
         time.sleep(0.05)
 
@@ -103,3 +109,32 @@ def event_status(event_type: str) -> str:
     if event_type.endswith("completed"):
         return "completed"
     return "running"
+
+
+def _background_runner_active(record: SessionRecord) -> bool:
+    metadata = record.session.metadata
+    if metadata.get("dispatch_mode") != "background" and "background_state" not in metadata:
+        return False
+
+    runner_pid = metadata.get("runner_pid")
+    try:
+        pid = int(runner_pid)
+    except (TypeError, ValueError):
+        return False
+
+    # When watch is executed in the same long-lived parent process (test mode),
+    # proactively reap an exited child to avoid treating zombies as running.
+    try:
+        finished_pid, _status = os.waitpid(pid, os.WNOHANG)
+        if finished_pid == pid:
+            return False
+    except ChildProcessError:
+        pass
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return False
+    return True

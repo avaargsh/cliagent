@@ -14,6 +14,8 @@ class ProviderSlot:
     provider_name: str
     model: str
     timeout_seconds: int
+    max_output_tokens: int = 1024
+    api_key_env: str = ""
 
 
 class ProviderCatalog:
@@ -29,6 +31,8 @@ class ProviderCatalog:
                     provider_name=provider.name,
                     model=provider.model,
                     timeout_seconds=provider.timeout_seconds,
+                    max_output_tokens=provider.max_output_tokens,
+                    api_key_env=provider.api_key_env,
                 )
                 for slot_name, provider in config.providers.items()
             }
