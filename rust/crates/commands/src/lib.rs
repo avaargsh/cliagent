@@ -160,6 +160,14 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Workspace,
     },
     SlashCommandSpec {
+        name: "workflow",
+        aliases: &[],
+        summary: "Inspect and manage workflow gates",
+        argument_hint: Some("<subcommand>"),
+        resume_supported: false,
+        category: SlashCommandCategory::Workspace,
+    },
+    SlashCommandSpec {
         name: "diff",
         aliases: &[],
         summary: "Show git diff for current workspace changes",
@@ -353,6 +361,9 @@ pub enum SlashCommand {
     Init,
     Diff,
     Version,
+    Workflow {
+        args: Option<String>,
+    },
     Export {
         path: Option<String>,
     },
@@ -438,6 +449,9 @@ impl SlashCommand {
             "version" => Self::Version,
             "export" => Self::Export {
                 path: parts.next().map(ToOwned::to_owned),
+            },
+            "workflow" => Self::Workflow {
+                args: remainder_after_command(trimmed, command),
             },
             "session" => Self::Session {
                 action: parts.next().map(ToOwned::to_owned),
@@ -1778,6 +1792,7 @@ pub fn handle_slash_command(
         | SlashCommand::Init
         | SlashCommand::Diff
         | SlashCommand::Version
+        | SlashCommand::Workflow { .. }
         | SlashCommand::Export { .. }
         | SlashCommand::Session { .. }
         | SlashCommand::Plugins { .. }
@@ -2069,6 +2084,18 @@ mod tests {
             })
         );
         assert_eq!(
+            SlashCommand::parse("/workflow status"),
+            Some(SlashCommand::Workflow {
+                args: Some("status".to_string())
+            })
+        );
+        assert_eq!(
+            SlashCommand::parse("/workflow config"),
+            Some(SlashCommand::Workflow {
+                args: Some("config".to_string())
+            })
+        );
+        assert_eq!(
             SlashCommand::parse("/session switch abc123"),
             Some(SlashCommand::Session {
                 action: Some("switch".to_string()),
@@ -2137,6 +2164,7 @@ mod tests {
         assert!(help.contains("/init"));
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
+        assert!(help.contains("/workflow <subcommand>"));
         assert!(help.contains("/export [file]"));
         assert!(help.contains("/session [list|switch <session-id>]"));
         assert!(help.contains(
@@ -2145,7 +2173,7 @@ mod tests {
         assert!(help.contains("aliases: /plugins, /marketplace"));
         assert!(help.contains("/agents"));
         assert!(help.contains("/skills"));
-        assert_eq!(slash_command_specs().len(), 28);
+        assert_eq!(slash_command_specs().len(), 29);
         assert_eq!(resume_supported_slash_commands().len(), 13);
     }
 
@@ -2432,6 +2460,84 @@ mod tests {
         let (name, description) = super::parse_skill_frontmatter(contents);
         assert_eq!(name.as_deref(), Some("hud"));
         assert_eq!(description.as_deref(), Some("Quoted description"));
+    }
+
+    #[test]
+    fn handles_agents_and_skills_commands_with_no_sources() {
+        let workspace = temp_dir("commands-empty-workspace");
+        let home = temp_dir("commands-empty-home");
+        let codex_home = temp_dir("commands-empty-codex");
+
+        let previous_home = env::var_os("HOME");
+        let previous_codex_home = env::var_os("CODEX_HOME");
+        env::set_var("HOME", &home);
+        env::set_var("CODEX_HOME", &codex_home);
+
+        let agents = super::handle_agents_slash_command(None, &workspace)
+            .expect("agents should render no entries");
+        assert_eq!(agents, "No agents found.");
+
+        let skills = super::handle_skills_slash_command(None, &workspace)
+            .expect("skills should render no entries");
+        assert_eq!(skills, "No skills found.");
+
+        match previous_home {
+            Some(previous_home) => env::set_var("HOME", previous_home),
+            None => env::remove_var("HOME"),
+        }
+        match previous_codex_home {
+            Some(previous_codex_home) => env::set_var("CODEX_HOME", previous_codex_home),
+            None => env::remove_var("CODEX_HOME"),
+        }
+
+        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_dir_all(home);
+        let _ = fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn discover_definition_roots_prefers_project_scope_before_user_scope() {
+        let _guard = env_lock();
+        let workspace = temp_dir("commands-discover-roots");
+        let project_root = workspace.join("project");
+        let nested = project_root.join("nested");
+        fs::create_dir_all(nested.join(".codex").join("agents")).expect("project nested codex root");
+        fs::create_dir_all(nested.join(".claw").join("agents")).expect("project nested claw root");
+        fs::create_dir_all(project_root.join(".codex").join("agents")).expect("project root codex root");
+        fs::create_dir_all(project_root.join(".claw").join("agents")).expect("project root claw root");
+
+        let home = temp_dir("commands-discover-home");
+        let codex_home = temp_dir("commands-discover-codex");
+        fs::create_dir_all(home.join(".codex").join("agents")).expect("user codex agents root");
+        fs::create_dir_all(home.join(".claw").join("agents")).expect("user claw agents root");
+        fs::create_dir_all(codex_home.join("agents")).expect("codex home agents root");
+
+        let previous_home = env::var_os("HOME");
+        let previous_codex_home = env::var_os("CODEX_HOME");
+        env::set_var("HOME", &home);
+        env::set_var("CODEX_HOME", &codex_home);
+
+        let roots = super::discover_definition_roots(&nested, "agents");
+        assert_eq!(roots[0], (DefinitionSource::ProjectCodex, nested.join(".codex").join("agents")));
+        assert_eq!(roots[1], (DefinitionSource::ProjectClaw, nested.join(".claw").join("agents")));
+        assert_eq!(roots[2], (DefinitionSource::ProjectCodex, project_root.join(".codex").join("agents")));
+        assert_eq!(roots[3], (DefinitionSource::ProjectClaw, project_root.join(".claw").join("agents")));
+        assert_eq!(roots[4], (DefinitionSource::UserCodexHome, codex_home.join("agents")));
+        assert_eq!(roots[5], (DefinitionSource::UserCodex, home.join(".codex").join("agents")));
+        assert_eq!(roots[6], (DefinitionSource::UserClaw, home.join(".claw").join("agents")));
+
+        match previous_home {
+            Some(previous_home) => env::set_var("HOME", previous_home),
+            None => env::remove_var("HOME"),
+        }
+        match previous_codex_home {
+            Some(previous_codex_home) => env::set_var("CODEX_HOME", previous_codex_home),
+            None => env::remove_var("CODEX_HOME"),
+        }
+
+        let _ = fs::remove_dir_all(workspace);
+        let _ = fs::remove_dir_all(home);
+        let _ = fs::remove_dir_all(codex_home);
     }
 
     #[test]

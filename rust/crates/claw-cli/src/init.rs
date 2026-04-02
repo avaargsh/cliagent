@@ -55,7 +55,10 @@ impl InitReport {
                 artifact.status.label()
             ));
         }
-        lines.push("  Next step        Review and tailor the generated guidance".to_string());
+        lines.push(
+            "  Next step        Review the guidance, then run `claw workflow init` if you want gate-based delivery tracking"
+                .to_string(),
+        );
         lines.join("\n")
     }
 }
@@ -210,6 +213,7 @@ pub(crate) fn render_init_claw_md(cwd: &Path) -> String {
     lines.push("## Working agreement".to_string());
     lines.push("- Prefer small, reviewable changes and keep generated bootstrap files aligned with actual repo workflows.".to_string());
     lines.push("- Keep shared defaults in `.claw.json`; reserve `.claw/settings.local.json` for machine-local overrides.".to_string());
+    lines.push("- If you enable workflow gates, keep machine-readable flow state in `.claw/workflow.json` and `.claw/workflow-state.json`; do not treat `CLAW.md` as machine config.".to_string());
     lines.push("- Do not overwrite existing `CLAW.md` content automatically; update it intentionally when repo workflows change.".to_string());
     lines.push(String::new());
 
@@ -358,6 +362,7 @@ mod tests {
         assert!(rendered.contains(".claw.json       created"));
         assert!(rendered.contains(".gitignore       created"));
         assert!(rendered.contains("CLAW.md          created"));
+        assert!(rendered.contains("claw workflow init"));
         assert!(root.join(".claw").is_dir());
         assert!(root.join(".claw.json").is_file());
         assert!(root.join("CLAW.md").is_file());
@@ -426,6 +431,7 @@ mod tests {
         assert!(rendered.contains("Frameworks/tooling markers: Next.js, React."));
         assert!(rendered.contains("pyproject.toml"));
         assert!(rendered.contains("Next.js detected"));
+        assert!(rendered.contains("do not treat `CLAW.md` as machine config"));
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }

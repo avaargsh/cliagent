@@ -79,6 +79,7 @@ From the release build:
 - Saved-session inspection and resume flows
 - Built-in workspace tools for shell, file read/write/edit, search, web fetch/search, todos, and notebook updates
 - Slash commands for status, compaction, config inspection, diff, export, session management, and version reporting
+- Repo-native workflow gates with `claw workflow init [--config PATH] [--force]`, `claw workflow status`, `claw workflow config`, `claw workflow gate ...` for auditable phase tracking
 - Local agent and skill discovery with `claw agents` and `claw skills`
 - Plugin discovery and management through the CLI and slash-command surfaces
 - OAuth login/logout plus model/provider selection from the command line

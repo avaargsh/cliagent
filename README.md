@@ -46,6 +46,7 @@ It currently includes:
 - `crates/plugins` — plugin model, hook pipeline, and bundled plugins
 - `crates/compat-harness` — compatibility layer for upstream editor integration
 - `crates/claw-cli` — interactive REPL, markdown rendering, and project bootstrap/init flows
+- repo-native workflow gates through `claw workflow init/status/config/gate ...`
 
 Run the Rust build:
 

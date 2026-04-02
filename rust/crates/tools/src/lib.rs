@@ -91,7 +91,10 @@ impl GlobalToolRegistry {
         Ok(Self { plugin_tools })
     }
 
-    pub fn normalize_allowed_tools(&self, values: &[String]) -> Result<Option<BTreeSet<String>>, String> {
+    pub fn normalize_allowed_tools(
+        &self,
+        values: &[String],
+    ) -> Result<Option<BTreeSet<String>>, String> {
         if values.is_empty() {
             return Ok(None);
         }
@@ -100,7 +103,11 @@ impl GlobalToolRegistry {
         let canonical_names = builtin_specs
             .iter()
             .map(|spec| spec.name.to_string())
-            .chain(self.plugin_tools.iter().map(|tool| tool.definition().name.clone()))
+            .chain(
+                self.plugin_tools
+                    .iter()
+                    .map(|tool| tool.definition().name.clone()),
+            )
             .collect::<Vec<_>>();
         let mut name_map = canonical_names
             .iter()
@@ -151,7 +158,8 @@ impl GlobalToolRegistry {
             .plugin_tools
             .iter()
             .filter(|tool| {
-                allowed_tools.is_none_or(|allowed| allowed.contains(tool.definition().name.as_str()))
+                allowed_tools
+                    .is_none_or(|allowed| allowed.contains(tool.definition().name.as_str()))
             })
             .map(|tool| ToolDefinition {
                 name: tool.definition().name.clone(),
@@ -174,7 +182,8 @@ impl GlobalToolRegistry {
             .plugin_tools
             .iter()
             .filter(|tool| {
-                allowed_tools.is_none_or(|allowed| allowed.contains(tool.definition().name.as_str()))
+                allowed_tools
+                    .is_none_or(|allowed| allowed.contains(tool.definition().name.as_str()))
             })
             .map(|tool| {
                 (
@@ -1461,16 +1470,30 @@ fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
     }
 
     let mut candidates = Vec::new();
+
+    if let Ok(cwd) = std::env::current_dir() {
+        for ancestor in cwd.ancestors() {
+            candidates.push(ancestor.join(".codex").join("skills"));
+            candidates.push(ancestor.join(".claw").join("skills"));
+            candidates.push(ancestor.join(".codex").join("commands"));
+            candidates.push(ancestor.join(".claw").join("commands"));
+        }
+    }
+
     if let Ok(codex_home) = std::env::var("CODEX_HOME") {
-        candidates.push(std::path::PathBuf::from(codex_home).join("skills"));
+        let codex_home = std::path::PathBuf::from(codex_home);
+        candidates.push(codex_home.join("skills"));
+        candidates.push(codex_home.join("commands"));
     }
     if let Ok(home) = std::env::var("HOME") {
         let home = std::path::PathBuf::from(home);
         candidates.push(home.join(".agents").join("skills"));
         candidates.push(home.join(".config").join("opencode").join("skills"));
         candidates.push(home.join(".codex").join("skills"));
+        candidates.push(home.join(".claw").join("skills"));
+        candidates.push(home.join(".codex").join("commands"));
+        candidates.push(home.join(".claw").join("commands"));
     }
-    candidates.push(std::path::PathBuf::from("/home/bellman/.codex/skills"));
 
     for root in candidates {
         let direct = root.join(requested).join("SKILL.md");
@@ -1518,12 +1541,13 @@ where
     }
 
     let agent_id = make_agent_id();
+    let model = resolve_agent_model(input.model.as_deref());
+    verify_agent_model_credentials(&model)?;
     let output_dir = agent_store_dir()?;
     std::fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
     let output_file = output_dir.join(format!("{agent_id}.md"));
     let manifest_file = output_dir.join(format!("{agent_id}.json"));
     let normalized_subagent_type = normalize_subagent_type(input.subagent_type.as_deref());
-    let model = resolve_agent_model(input.model.as_deref());
     let agent_name = input
         .name
         .as_deref()
@@ -1581,6 +1605,11 @@ where
     }
 
     Ok(manifest)
+}
+
+fn verify_agent_model_credentials(model: &str) -> Result<(), String> {
+    ProviderClient::from_model(model).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
@@ -2210,10 +2239,22 @@ fn agent_store_dir() -> Result<std::path::PathBuf, String> {
         return Ok(std::path::PathBuf::from(path));
     }
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    if let Some(workspace_root) = find_workspace_root_for_agents(&cwd) {
+        return Ok(workspace_root.join(".claw-agents"));
+    }
     if let Some(workspace_root) = cwd.ancestors().nth(2) {
         return Ok(workspace_root.join(".claw-agents"));
     }
     Ok(cwd.join(".claw-agents"))
+}
+
+fn find_workspace_root_for_agents(start: &Path) -> Option<PathBuf> {
+    for ancestor in start.ancestors() {
+        if ancestor.join("Cargo.toml").exists() || ancestor.join(".git").is_dir() {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
 }
 
 fn make_agent_id() -> String {
@@ -3066,6 +3107,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::thread;
     use std::time::Duration;
@@ -3073,9 +3115,11 @@ mod tests {
     use super::{
         agent_permission_policy, allowed_tools_for_subagent, execute_agent_with_spawn,
         execute_tool, final_assistant_text, mvp_tool_specs, persist_agent_terminal_state,
-        push_output_block, AgentInput, AgentJob, SubagentToolExecutor,
+        push_output_block, agent_store_dir, resolve_skill_path, AgentInput, AgentJob,
+        GlobalToolRegistry, SubagentToolExecutor,
     };
     use api::OutputContentBlock;
+    use plugins::{PluginTool, PluginToolDefinition, PluginToolPermission};
     use runtime::{ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError, Session};
     use serde_json::json;
 
@@ -3084,12 +3128,163 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    struct WorkingDirectoryGuard {
+        original: PathBuf,
+    }
+
+    impl WorkingDirectoryGuard {
+        fn set_to(path: &PathBuf) -> Self {
+            let original = std::env::current_dir().expect("cwd exists");
+            std::env::set_current_dir(path).expect("switch cwd");
+            Self { original }
+        }
+    }
+
+    impl Drop for WorkingDirectoryGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    struct TestEnvVars {
+        restored: Vec<(String, Option<String>)>,
+    }
+
+    impl TestEnvVars {
+        fn with_agent_credentials() -> Self {
+            let restored = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"]
+                .into_iter()
+                .map(|name| {
+                    let previous = std::env::var(name).ok();
+                    if previous.is_none() {
+                        std::env::set_var(name, "test-agent-token");
+                    }
+                    (name.to_string(), previous)
+                })
+                .collect::<Vec<_>>();
+
+            Self { restored }
+        }
+
+        fn without_agent_credentials() -> Self {
+            let restored = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"]
+                .into_iter()
+                .map(|name| {
+                    let previous = std::env::var(name).ok();
+                    std::env::remove_var(name);
+                    (name.to_string(), previous)
+                })
+                .collect::<Vec<_>>();
+
+            Self { restored }
+        }
+    }
+
+    impl Drop for TestEnvVars {
+        fn drop(&mut self) {
+            for (name, previous) in self.restored.drain(..) {
+                match previous {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
     fn temp_path(name: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("time")
             .as_nanos();
         std::env::temp_dir().join(format!("claw-tools-{unique}-{name}"))
+    }
+
+    fn plugin_tool(name: &str, permission: PluginToolPermission) -> PluginTool {
+        PluginTool::new(
+            &format!("{name}-plugin-id"),
+            "test-plugin",
+            PluginToolDefinition {
+                name: name.to_string(),
+                description: Some(format!("Test plugin tool {name}")),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string" }
+                    },
+                    "required": ["message"],
+                    "additionalProperties": false
+                }),
+            },
+            "plugin-command".to_string(),
+            Vec::new(),
+            permission,
+            None,
+        )
+    }
+
+    #[test]
+    fn execute_agent_requires_credentials_before_spawn() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _credentials = TestEnvVars::without_agent_credentials();
+        let spawn_called = Arc::new(AtomicBool::new(false));
+        let called = Arc::clone(&spawn_called);
+
+        let error = execute_agent_with_spawn(
+            AgentInput {
+                description: "Inspect state".to_string(),
+                prompt: "Check status".to_string(),
+                subagent_type: Some("Explore".to_string()),
+                name: Some("missing-creds".to_string()),
+                model: Some("claude-opus-4-6".to_string()),
+            },
+            move |_| {
+                called.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect_err("agent should require credentials");
+        assert!(error.contains("missing Claw credentials"));
+        assert!(!spawn_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn resolve_skill_path_prefers_workspace_ancestors() {
+        let root = temp_path("claw-tools-skill-ancestor");
+        let nested = root.join("nested").join("deep");
+        std::fs::create_dir_all(&nested).expect("nested path should exist");
+        let expected = root.join(".claw").join("skills").join("help");
+        let expected_file = expected.join("SKILL.md");
+        std::fs::create_dir_all(&expected).expect("skill dir should exist");
+        std::fs::write(
+            &expected_file,
+            "# Help from ancestor\n\nFrom workspace path.",
+        )
+        .expect("skill file should exist");
+
+        let _cwd = WorkingDirectoryGuard::set_to(&nested);
+        let resolved = resolve_skill_path("help").expect("skill should resolve from cwd ancestor");
+        assert_eq!(resolved, expected_file);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn agent_store_dir_prefers_workspace_root_markers() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = temp_path("claw-tools-agent-store");
+        let nested = root.join("repo").join("src");
+        std::fs::create_dir_all(&nested).expect("repo path should exist");
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"agent-test\"\n").expect("write marker");
+        let _cwd = WorkingDirectoryGuard::set_to(&nested);
+
+        let store = agent_store_dir().expect("agent store should resolve");
+        assert_eq!(store, root.join(".claw-agents"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3113,6 +3308,103 @@ mod tests {
         assert!(names.contains(&"StructuredOutput"));
         assert!(names.contains(&"REPL"));
         assert!(names.contains(&"PowerShell"));
+    }
+
+    #[test]
+    fn normalizes_allowed_tools_with_aliases_and_plugins() {
+        let registry =
+            GlobalToolRegistry::with_plugin_tools(vec![plugin_tool("plugin_echo", PluginToolPermission::ReadOnly)])
+                .expect("plugin registry should build");
+
+        let allowed = registry
+            .normalize_allowed_tools(&[
+                "read,write".to_string(),
+                "glob_search".to_string(),
+                "plugin_echo".to_string(),
+            ])
+            .expect("allowed tools should parse");
+        let allowed = allowed.expect("set should be returned");
+
+        let expected = ["read_file", "write_file", "glob_search", "plugin_echo"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(allowed, expected);
+    }
+
+    #[test]
+    fn normalizes_allowed_tools_with_case_and_punctuation() {
+        let registry =
+            GlobalToolRegistry::with_plugin_tools(vec![plugin_tool("plugin_echo", PluginToolPermission::ReadOnly)])
+                .expect("plugin registry should build");
+
+        let allowed = registry
+            .normalize_allowed_tools(&[
+                " READ , write_file ".to_string(),
+                "plugin-echo".to_string(),
+                "GreP".to_string(),
+            ])
+            .expect("allowed tools should parse");
+        let allowed = allowed.expect("set should be returned");
+
+        let expected = ["read_file", "write_file", "grep_search", "plugin_echo"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(allowed, expected);
+    }
+
+    #[test]
+    fn rejects_unknown_tool_in_allowed_tools() {
+        let registry = GlobalToolRegistry::with_plugin_tools(vec![])
+            .expect("empty plugin set should build");
+        let err = registry
+            .normalize_allowed_tools(&["ghost_tool".to_string()])
+            .expect_err("unknown tools should be rejected");
+        assert!(err.contains("unsupported tool in --allowedTools: ghost_tool"));
+    }
+
+    #[test]
+    fn rejects_plugin_tool_conflict_with_builtin_names() {
+        let conflict = GlobalToolRegistry::with_plugin_tools(vec![plugin_tool("read_file", PluginToolPermission::ReadOnly)])
+            .expect_err("builtin conflicts should be rejected");
+        assert_eq!(
+            conflict,
+            "plugin tool `read_file` conflicts with a built-in tool name"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_plugin_tool_names() {
+        let duplicate = GlobalToolRegistry::with_plugin_tools(vec![
+            plugin_tool("plugin_echo", PluginToolPermission::ReadOnly),
+            plugin_tool("plugin_echo", PluginToolPermission::WorkspaceWrite),
+        ])
+        .expect_err("duplicate plugin names should be rejected");
+        assert_eq!(duplicate, "duplicate plugin tool name `plugin_echo`");
+    }
+
+    #[test]
+    fn definitions_and_permissions_include_plugin_tools() {
+        let registry = GlobalToolRegistry::with_plugin_tools(vec![
+            plugin_tool("plugin_echo", PluginToolPermission::WorkspaceWrite),
+            plugin_tool("plugin_read", PluginToolPermission::ReadOnly),
+        ])
+        .expect("plugin registry should build");
+
+        let filtered = registry.definitions(Some(&BTreeSet::from(["plugin_read".to_string()])));
+        let names = filtered
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["plugin_read"]);
+
+        let permission_specs = registry.permission_specs(Some(&BTreeSet::from(["plugin_read".to_string()])));
+        let required = permission_specs
+            .into_iter()
+            .find(|(name, _)| name == "plugin_read")
+            .expect("plugin_read should be included in permission specs");
+        assert_eq!(required.1, runtime::PermissionMode::ReadOnly);
     }
 
     #[test]
@@ -3452,6 +3744,18 @@ mod tests {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = temp_path("claw-tools-skill");
+        let codex_home = root.join("skills");
+        let skill_dir = codex_home.join("help");
+        std::fs::create_dir_all(&skill_dir).expect("create test skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "# Help\n\nGuide on using oh-my-codex plugin",
+        )
+        .expect("write test skill prompt");
+        let original_codex_home = std::env::var("CODEX_HOME").ok();
+        std::env::set_var("CODEX_HOME", &root);
+
         let result = execute_tool(
             "Skill",
             &json!({
@@ -3486,6 +3790,11 @@ mod tests {
             .as_str()
             .expect("path")
             .ends_with("/help/SKILL.md"));
+        match original_codex_home {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3526,6 +3835,7 @@ mod tests {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _credentials = TestEnvVars::with_agent_credentials();
         let dir = temp_path("agent-store");
         std::env::set_var("CLAW_AGENT_STORE", &dir);
         let captured = Arc::new(Mutex::new(None::<AgentJob>));
@@ -3603,6 +3913,7 @@ mod tests {
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _credentials = TestEnvVars::with_agent_credentials();
         let dir = temp_path("agent-runner");
         std::env::set_var("CLAW_AGENT_STORE", &dir);
 

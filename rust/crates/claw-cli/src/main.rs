@@ -1,6 +1,7 @@
 mod init;
 mod input;
 mod render;
+mod workflow_cmd;
 
 use std::collections::BTreeSet;
 use std::env;
@@ -32,14 +33,16 @@ use plugins::{PluginManager, PluginManagerConfig};
 use render::{MarkdownStreamState, Spinner, TerminalRenderer};
 use runtime::{
     clear_oauth_credentials, generate_pkce_pair, generate_state, load_system_prompt,
-    parse_oauth_callback_request_target, save_oauth_credentials, ApiClient, ApiRequest,
-    AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource, ContentBlock,
+    load_workflow_snapshot, parse_oauth_callback_request_target, save_oauth_credentials, ApiClient,
+    ApiRequest, AssistantEvent, CompactionConfig, ConfigLoader, ConfigSource, ContentBlock,
     ConversationMessage, ConversationRuntime, MessageRole, OAuthAuthorizationRequest, OAuthConfig,
     OAuthTokenExchangeRequest, PermissionMode, PermissionPolicy, ProjectContext, RuntimeError,
-    Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
+    Session, TokenUsage, ToolError, ToolExecutor, UsageTracker, WorkflowError,
 };
 use serde_json::json;
 use tools::GlobalToolRegistry;
+use workflow_cmd::split_repl_args;
+use workflow_cmd::{parse_workflow_args, run_workflow_command, WorkflowCliCommand};
 
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
 fn max_tokens_for_model(model: &str) -> u32 {
@@ -92,6 +95,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             session_path,
             commands,
         } => resume_session(&session_path, &commands),
+        CliAction::Workflow {
+            command,
+            output_format,
+        } => {
+            let cwd = env::current_dir()?;
+            match run_workflow_command(&cwd, &command, output_format) {
+                Ok(output) => println!("{output}"),
+                Err(error) => {
+                    if output_format == CliOutputFormat::Json {
+                        let payload = json!({
+                            "schema_version": 1,
+                            "command": workflow_command_name(&command),
+                            "ok": false,
+                            "data": serde_json::Value::Null,
+                            "error": error.to_string(),
+                        });
+                        println!("{}", serde_json::to_string_pretty(&payload)?);
+                    } else {
+                        return Err(error);
+                    }
+                }
+            }
+        }
         CliAction::Prompt {
             prompt,
             model,
@@ -131,6 +157,10 @@ enum CliAction {
     ResumeSession {
         session_path: PathBuf,
         commands: Vec<String>,
+    },
+    Workflow {
+        command: WorkflowCliCommand,
+        output_format: CliOutputFormat,
     },
     Prompt {
         prompt: String,
@@ -296,6 +326,10 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         "login" => Ok(CliAction::Login),
         "logout" => Ok(CliAction::Logout),
         "init" => Ok(CliAction::Init),
+        "workflow" => Ok(CliAction::Workflow {
+            command: parse_workflow_args(&rest[1..])?,
+            output_format,
+        }),
         "prompt" => {
             let prompt = rest[1..].join(" ");
             if prompt.trim().is_empty() {
@@ -999,6 +1033,7 @@ fn run_resume_command(
         | SlashCommand::Permissions { .. }
         | SlashCommand::Session { .. }
         | SlashCommand::Plugins { .. }
+        | SlashCommand::Workflow { .. }
         | SlashCommand::Unknown(_) => Err("unsupported resumed slash command".into()),
     }
 }
@@ -1167,7 +1202,7 @@ impl LiveCli {
             TerminalRenderer::new().color_theme(),
             &mut stdout,
         )?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
+        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode, false);
         let result = self.runtime.run_turn(input, Some(&mut permission_prompter));
         match result {
             Ok(_) => {
@@ -1214,7 +1249,7 @@ impl LiveCli {
             self.permission_mode,
             None,
         )?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
+        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode, true);
         let summary = runtime.run_turn(input, Some(&mut permission_prompter))?;
         self.runtime = runtime;
         self.persist_session()?;
@@ -1312,6 +1347,10 @@ impl LiveCli {
             }
             SlashCommand::Export { path } => {
                 self.export_session(path.as_deref())?;
+                false
+            }
+            SlashCommand::Workflow { args } => {
+                self.handle_workflow_slash_command(args.as_deref())?;
                 false
             }
             SlashCommand::Session { action, target } => {
@@ -1584,6 +1623,22 @@ impl LiveCli {
         Ok(())
     }
 
+    fn handle_workflow_slash_command(
+        &self,
+        args: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let workflow_args = split_repl_args(args.unwrap_or_default())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let command = parse_workflow_args(&workflow_args)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let cwd = env::current_dir()?;
+        println!(
+            "{}",
+            run_workflow_command(&cwd, &command, CliOutputFormat::Text)?
+        );
+        Ok(())
+    }
+
     fn handle_session_command(
         &mut self,
         action: Option<&str>,
@@ -1696,7 +1751,7 @@ impl LiveCli {
             self.permission_mode,
             progress,
         )?;
-        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
+        let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode, false);
         let summary = runtime.run_turn(prompt, Some(&mut permission_prompter))?;
         Ok(final_assistant_text(&summary).trim().to_string())
     }
@@ -2975,6 +3030,7 @@ fn build_runtime(
 ) -> Result<ConversationRuntime<DefaultRuntimeClient, CliToolExecutor>, Box<dyn std::error::Error>>
 {
     let (feature_config, tool_registry) = build_runtime_plugin_state()?;
+    let workspace_root = env::current_dir()?;
     Ok(ConversationRuntime::new_with_features(
         session,
         DefaultRuntimeClient::new(
@@ -2985,7 +3041,12 @@ fn build_runtime(
             tool_registry.clone(),
             progress_reporter,
         )?,
-        CliToolExecutor::new(allowed_tools.clone(), emit_output, tool_registry.clone()),
+        CliToolExecutor::new(
+            allowed_tools.clone(),
+            emit_output,
+            tool_registry.clone(),
+            workspace_root,
+        ),
         permission_policy(permission_mode, &tool_registry),
         system_prompt,
         feature_config,
@@ -2994,11 +3055,15 @@ fn build_runtime(
 
 struct CliPermissionPrompter {
     current_mode: PermissionMode,
+    silent: bool,
 }
 
 impl CliPermissionPrompter {
-    fn new(current_mode: PermissionMode) -> Self {
-        Self { current_mode }
+    fn new(current_mode: PermissionMode, silent: bool) -> Self {
+        Self {
+            current_mode,
+            silent,
+        }
     }
 }
 
@@ -3007,6 +3072,16 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
         &mut self,
         request: &runtime::PermissionRequest,
     ) -> runtime::PermissionPromptDecision {
+        if self.silent {
+            return runtime::PermissionPromptDecision::Deny {
+                reason: format!(
+                    "tool '{}' requires {} permission; current mode is {}",
+                    request.tool_name,
+                    request.required_mode.as_str(),
+                    self.current_mode.as_str()
+                ),
+            };
+        }
         println!();
         println!("Permission approval required");
         println!("  Tool             {}", request.tool_name);
@@ -3853,6 +3928,8 @@ struct CliToolExecutor {
     emit_output: bool,
     allowed_tools: Option<AllowedToolSet>,
     tool_registry: GlobalToolRegistry,
+    workspace_root: PathBuf,
+    enforce_workflow_gates: bool,
 }
 
 impl CliToolExecutor {
@@ -3860,13 +3937,59 @@ impl CliToolExecutor {
         allowed_tools: Option<AllowedToolSet>,
         emit_output: bool,
         tool_registry: GlobalToolRegistry,
+        workspace_root: PathBuf,
     ) -> Self {
         Self {
             renderer: TerminalRenderer::new(),
             emit_output,
             allowed_tools,
             tool_registry,
+            workspace_root,
+            enforce_workflow_gates: true,
         }
+    }
+
+    fn workflow_gate_rejection(&self, tool_name: &str) -> Option<String> {
+        if !self.enforce_workflow_gates {
+            return None;
+        }
+
+        let required_mode = permission_policy(PermissionMode::DangerFullAccess, &self.tool_registry)
+            .required_mode_for(tool_name);
+        if required_mode == PermissionMode::ReadOnly {
+            return None;
+        }
+
+        let snapshot = match load_workflow_snapshot(&self.workspace_root) {
+            Ok(snapshot) => snapshot,
+            Err(WorkflowError::NotConfigured(_)) => return None,
+            Err(error) => {
+                return Some(format!(
+                    "workflow gate check failed before tool execution: {error}"
+                ))
+            }
+        };
+
+        if snapshot.is_complete {
+            return None;
+        }
+
+        let Some(current_phase_id) = snapshot.current_phase_id else {
+            return None;
+        };
+
+        let current_phase = snapshot
+            .phases
+            .iter()
+            .find(|phase| phase.id == current_phase_id)?;
+
+        Some(format!(
+            "workflow gate blocks tool execution: current phase `{}` ({}) is {}. Run `claw workflow gate approve --phase {}` first.",
+            current_phase.id,
+            current_phase.title,
+            current_phase.status.as_str(),
+            current_phase.id
+        ))
     }
 }
 
@@ -3880,6 +4003,9 @@ impl ToolExecutor for CliToolExecutor {
             return Err(ToolError::new(format!(
                 "tool `{tool_name}` is not enabled by the current --allowedTools setting"
             )));
+        }
+        if let Some(reason) = self.workflow_gate_rejection(tool_name) {
+            return Err(ToolError::new(reason));
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
@@ -4041,6 +4167,23 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         out,
         "  claw init                             Scaffold CLAW.md + local files"
     )?;
+    writeln!(
+        out,
+        "  claw workflow init [--config PATH] [--force] Scaffold repo-native workflow config and artifacts"
+    )?;
+    writeln!(
+        out,
+        "  claw workflow status                  Inspect workflow gate state"
+    )?;
+    writeln!(
+        out,
+        "  claw workflow config                  Inspect normalized workflow policy and phases"
+    )?;
+    writeln!(
+        out,
+        "  claw workflow gate approve [phase]    Approve the current workflow gate"
+    )?;
+    writeln!(out, "  claw workflow gate return [phase] --reason \"...\"")?;
     writeln!(out)?;
     writeln!(out, "Flags")?;
     writeln!(
@@ -4098,7 +4241,27 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "  claw /skills")?;
     writeln!(out, "  claw login")?;
     writeln!(out, "  claw init")?;
+    writeln!(out, "  claw workflow init")?;
+    writeln!(out, "  claw workflow config")?;
+    writeln!(
+        out,
+        "  claw workflow gate return plan --reason \"need tighter acceptance\""
+    )?;
+    writeln!(
+        out,
+        "  claw workflow init --config .claw/workflow-template.json --force"
+    )?;
     Ok(())
+}
+
+fn workflow_command_name(command: &WorkflowCliCommand) -> &'static str {
+    match command {
+        WorkflowCliCommand::Init { .. } => "workflow init",
+        WorkflowCliCommand::Status => "workflow status",
+        WorkflowCliCommand::Config => "workflow config",
+        WorkflowCliCommand::GateApprove { .. } => "workflow gate approve",
+        WorkflowCliCommand::GateReturn { .. } => "workflow gate return",
+    }
 }
 
 fn print_help() {
@@ -4115,19 +4278,41 @@ mod tests {
         normalize_permission_mode, parse_args, parse_git_status_metadata, permission_policy,
         print_help_to, push_output_block, render_config_report, render_memory_report,
         render_repl_help, render_unknown_repl_command, resolve_model_alias, response_to_events,
-        resume_supported_slash_commands, slash_command_completion_candidates, status_context,
-        CliAction, CliOutputFormat, InternalPromptProgressEvent, InternalPromptProgressState,
-        SlashCommand, StatusUsage, DEFAULT_MODEL,
+        resume_supported_slash_commands, slash_command_completion_candidates, split_repl_args,
+        status_context, workflow_command_name, CliAction, CliOutputFormat, CliPermissionPrompter,
+        InternalPromptProgressEvent, InternalPromptProgressState, SlashCommand, StatusUsage,
+        WorkflowCliCommand, DEFAULT_MODEL,
     };
+    use crate::workflow_cmd::parse_workflow_args;
     use api::{MessageResponse, OutputContentBlock, Usage};
     use plugins::{PluginTool, PluginToolDefinition, PluginToolPermission};
-    use runtime::{AssistantEvent, ContentBlock, ConversationMessage, MessageRole, PermissionMode};
+    use crate::CliToolExecutor;
+    use runtime::{
+        AssistantEvent, ContentBlock, ConversationMessage, MessageRole, PermissionMode,
+        PermissionPromptDecision, PermissionPrompter, ToolExecutor,
+        approve_workflow_gate, initialize_workflow, load_workflow_snapshot,
+    };
     use serde_json::json;
+    use std::fs;
     use std::path::PathBuf;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tools::GlobalToolRegistry;
 
-    fn registry_with_plugin_tool() -> GlobalToolRegistry {
+    fn temporary_workdir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("claw-workflow-gate-{nanos}"));
+        fs::create_dir_all(&path).expect("temporary workdir should be created");
+        path
+    }
+
+    fn gate_executor_for(workspace_root: PathBuf) -> CliToolExecutor {
+        CliToolExecutor::new(None, false, GlobalToolRegistry::builtin(), workspace_root)
+    }
+
+    fn plugin_tool_registry(required_permission: PluginToolPermission) -> GlobalToolRegistry {
         GlobalToolRegistry::with_plugin_tools(vec![PluginTool::new(
             "plugin-demo@external",
             "plugin-demo",
@@ -4145,10 +4330,23 @@ mod tests {
             },
             "echo".to_string(),
             Vec::new(),
-            PluginToolPermission::WorkspaceWrite,
+            required_permission,
             None,
         )])
-        .expect("plugin tool registry should build")
+        .expect("plugin registry should build")
+    }
+
+    fn registry_with_plugin_tool() -> GlobalToolRegistry {
+        plugin_tool_registry(PluginToolPermission::WorkspaceWrite)
+    }
+
+    fn gate_executor_for_plugin(workspace_root: PathBuf, required_permission: PluginToolPermission) -> CliToolExecutor {
+        CliToolExecutor::new(
+            None,
+            false,
+            plugin_tool_registry(required_permission),
+            workspace_root,
+        )
     }
 
     #[test]
@@ -4279,10 +4477,56 @@ mod tests {
     }
 
     #[test]
+    fn parses_allowed_tools_flags_with_case_and_alias_normalization() {
+        let args = vec![
+            "--allowedTools".to_string(),
+            "READ, write-file".to_string(),
+            "--allowed-tools".to_string(),
+            "   Edit ".to_string(),
+            "--allowedTools=grep".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).expect("args should parse"),
+            CliAction::Repl {
+                model: DEFAULT_MODEL.to_string(),
+                allowed_tools: Some(
+                    [
+                        "edit_file",
+                        "grep_search",
+                        "read_file",
+                        "write_file"
+                    ]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+                ),
+                permission_mode: PermissionMode::DangerFullAccess,
+            }
+        );
+    }
+
+    #[test]
     fn rejects_unknown_allowed_tools() {
         let error = parse_args(&["--allowedTools".to_string(), "teleport".to_string()])
             .expect_err("tool should be rejected");
         assert!(error.contains("unsupported tool in --allowedTools: teleport"));
+    }
+
+    #[test]
+    fn json_permission_prompter_denies_without_prompting() {
+        let mut prompter = CliPermissionPrompter::new(PermissionMode::WorkspaceWrite, true);
+        let request = runtime::PermissionRequest {
+            tool_name: "bash".to_string(),
+            input: "{\"command\":\"rm -rf /tmp\"}".to_string(),
+            current_mode: PermissionMode::WorkspaceWrite,
+            required_mode: PermissionMode::DangerFullAccess,
+        };
+        let decision = prompter.decide(&request);
+        assert!(matches!(
+            decision,
+            PermissionPromptDecision::Deny { reason } if reason.contains("requires danger-full-access")
+                && reason.contains("current mode is workspace-write")
+        ));
     }
 
     #[test]
@@ -4332,6 +4576,129 @@ mod tests {
                 args: Some("--help".to_string())
             }
         );
+        assert_eq!(
+            parse_args(&["workflow".to_string(), "status".to_string()])
+                .expect("workflow status should parse"),
+            CliAction::Workflow {
+                command: WorkflowCliCommand::Status,
+                output_format: CliOutputFormat::Text,
+            }
+        );
+        assert_eq!(
+            parse_args(&["workflow".to_string(), "config".to_string()])
+                .expect("workflow config should parse"),
+            CliAction::Workflow {
+                command: WorkflowCliCommand::Config,
+                output_format: CliOutputFormat::Text,
+            }
+        );
+        assert_eq!(
+            parse_args(&[
+                "workflow".to_string(),
+                "init".to_string(),
+                "--config".to_string(),
+                "configs/workflow.json".to_string(),
+                "--force".to_string(),
+            ])
+            .expect("workflow init with template should parse"),
+            CliAction::Workflow {
+                command: WorkflowCliCommand::Init {
+                    template_path: Some("configs/workflow.json".to_string()),
+                    force: true,
+                },
+                output_format: CliOutputFormat::Text,
+            }
+        );
+        assert_eq!(
+            parse_args(&[
+                "--output-format=json".to_string(),
+                "workflow".to_string(),
+                "init".to_string(),
+                "--config=templates/custom-workflow.json".to_string(),
+                "--force".to_string(),
+            ])
+            .expect("workflow init with --config= should parse"),
+            CliAction::Workflow {
+                command: WorkflowCliCommand::Init {
+                    template_path: Some("templates/custom-workflow.json".to_string()),
+                    force: true,
+                },
+                output_format: CliOutputFormat::Json,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_workflow_gate_commands() {
+        assert_eq!(
+            parse_args(&[
+                "workflow".to_string(),
+                "gate".to_string(),
+                "approve".to_string(),
+                "plan".to_string(),
+                "--note".to_string(),
+                "ready".to_string(),
+            ])
+            .expect("workflow gate approve should parse"),
+            CliAction::Workflow {
+                command: WorkflowCliCommand::GateApprove {
+                    phase_id: Some("plan".to_string()),
+                    note: Some("ready".to_string()),
+                },
+                output_format: CliOutputFormat::Text,
+            }
+        );
+        assert_eq!(
+            parse_args(&[
+                "--output-format=json".to_string(),
+                "workflow".to_string(),
+                "gate".to_string(),
+                "return".to_string(),
+                "--phase=scope".to_string(),
+                "--reason=missing coverage".to_string(),
+            ])
+            .expect("workflow gate return should parse"),
+            CliAction::Workflow {
+                command: WorkflowCliCommand::GateReturn {
+                    phase_id: Some("scope".to_string()),
+                    reason: "missing coverage".to_string(),
+                },
+                output_format: CliOutputFormat::Json,
+            }
+        );
+    }
+
+    #[test]
+    fn workflow_command_name_matches_command_kind() {
+        assert_eq!(
+            workflow_command_name(&WorkflowCliCommand::Status),
+            "workflow status"
+        );
+        assert_eq!(
+            workflow_command_name(&WorkflowCliCommand::Config),
+            "workflow config"
+        );
+        assert_eq!(
+            workflow_command_name(&WorkflowCliCommand::Init {
+                template_path: None,
+                force: false,
+            }),
+            "workflow init"
+        );
+        assert_eq!(
+            workflow_command_name(&WorkflowCliCommand::GateApprove {
+                phase_id: Some("plan".to_string()),
+                note: Some("ready".to_string()),
+            }),
+            "workflow gate approve"
+        );
+        assert_eq!(
+            workflow_command_name(&WorkflowCliCommand::GateReturn {
+                phase_id: None,
+                reason: "need".to_string(),
+            }),
+            "workflow gate return"
+        );
     }
 
     #[test]
@@ -4355,6 +4722,345 @@ mod tests {
             .expect_err("/status should remain REPL-only when invoked directly");
         assert!(error.contains("Direct slash command unavailable"));
         assert!(error.contains("/status"));
+        let workflow_error = parse_args(&["/workflow".to_string()])
+            .expect_err("/workflow should remain interactive-only when invoked directly");
+        assert!(workflow_error.contains("Direct slash command unavailable"));
+        assert!(workflow_error.contains("/workflow"));
+    }
+
+    #[test]
+    fn parses_repl_workflow_args_with_quoted_reason() {
+        let workflow_args = split_repl_args(r#"gate return plan --reason "missing coverage""#)
+            .expect("quoted arguments should parse");
+        assert_eq!(
+            parse_workflow_args(&workflow_args).expect("workflow args should parse"),
+            WorkflowCliCommand::GateReturn {
+                phase_id: Some("plan".to_string()),
+                reason: "missing coverage".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_repl_workflow_args_with_escaped_quote() {
+        let workflow_args =
+            split_repl_args(r#"gate return plan --reason "needs \"extra\" review""#)
+                .expect("escaped quote should parse");
+        assert_eq!(
+            parse_workflow_args(&workflow_args).expect("workflow args should parse"),
+            WorkflowCliCommand::GateReturn {
+                phase_id: Some("plan".to_string()),
+                reason: r#"needs "extra" review"#.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_repl_workflow_args_with_unmatched_quote() {
+        let error = split_repl_args(r#"gate return plan --reason "missing coverage"#)
+            .expect_err("unmatched quote should fail");
+        assert!(error.contains("unmatched"));
+    }
+
+    #[test]
+    fn workflow_gate_blocks_tool_execution_for_unapproved_phase() {
+        let workspace = temporary_workdir();
+        initialize_workflow(&workspace).expect("workflow should initialize");
+        let mut executor = gate_executor_for(workspace.clone());
+
+        let target = workspace.join("blocked.txt");
+        let input = serde_json::to_string(&serde_json::json!({
+            "path": target,
+            "content": "blocked",
+        }))
+        .expect("tool input json should serialize");
+
+        let error = executor
+            .execute("write_file", &input)
+            .expect_err("tool execution should be blocked before gate approval");
+        assert!(error.to_string().contains("workflow gate blocks tool execution"));
+        assert!(!load_workflow_snapshot(&workspace)
+            .expect("snapshot should load")
+            .is_complete);
+    }
+
+    #[test]
+    fn workflow_gate_allows_tools_when_not_configured() {
+        let workspace = temporary_workdir();
+        let executor = gate_executor_for(workspace);
+
+        for tool_name in ["write_file", "read_file", "does_not_exist", "bash"] {
+            let reason = executor.workflow_gate_rejection(tool_name);
+            assert!(
+                reason.is_none(),
+                "tool `{tool_name}` should not be blocked when workflow snapshot is not configured"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_gate_allows_plugin_tools_when_not_configured() {
+        let workspace = temporary_workdir();
+        let cases = [
+            PluginToolPermission::ReadOnly,
+            PluginToolPermission::WorkspaceWrite,
+            PluginToolPermission::DangerFullAccess,
+        ];
+
+        for required_permission in cases {
+            let executor = gate_executor_for_plugin(workspace.clone(), required_permission);
+            assert!(
+                executor.workflow_gate_rejection("plugin_echo").is_none(),
+                "plugin {required_permission:?} should not be blocked when workflow is not configured"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_gate_blocks_unknown_tool_before_approval() {
+        let workspace = temporary_workdir();
+        initialize_workflow(&workspace).expect("workflow should initialize");
+        let executor = gate_executor_for(workspace);
+
+        let reason = executor.workflow_gate_rejection("does_not_exist");
+        assert!(
+            reason.is_some(),
+            "unknown tools should also be subject to workflow gate when unapproved"
+        );
+        assert!(
+            reason
+            .expect("workflow gate reason should exist")
+            .contains("workflow gate blocks tool execution")
+        );
+    }
+
+    #[test]
+    fn workflow_gate_unknown_tool_executes_normally_when_not_configured() {
+        let workspace = temporary_workdir();
+        let mut executor = gate_executor_for(workspace);
+
+        let error = executor
+            .execute("does_not_exist", "{}")
+            .expect_err("unsupported tool should fail after allowed checks when no gate is configured");
+        assert_eq!(error.to_string(), "unsupported tool: does_not_exist");
+    }
+
+    #[test]
+    fn workflow_gate_plugins_respect_allowed_tools_before_gate() {
+        let workspace = temporary_workdir();
+        initialize_workflow(&workspace).expect("workflow should initialize");
+        let mut executor = CliToolExecutor::new(
+            Some(std::collections::BTreeSet::from([String::from("plugin_echo")])),
+            false,
+            plugin_tool_registry(PluginToolPermission::WorkspaceWrite),
+            workspace.clone(),
+        );
+
+        let reason = executor.execute("plugin_echo", r#"{"message":"blocked"}"#);
+        let error = reason.expect_err("workflow gate should block allowed plugin write tools");
+        assert!(error.to_string().contains("workflow gate blocks tool execution"));
+    }
+
+    #[test]
+    fn workflow_gate_disallows_plugin_tools_before_allowedlist() {
+        let workspace = temporary_workdir();
+        initialize_workflow(&workspace).expect("workflow should initialize");
+        let mut executor = CliToolExecutor::new(
+            Some(std::collections::BTreeSet::from([String::from("read_file")])),
+            false,
+            plugin_tool_registry(PluginToolPermission::WorkspaceWrite),
+            workspace,
+        );
+
+        let error = executor
+            .execute("plugin_echo", r#"{"message":"blocked"}"#)
+            .expect_err("disallowed plugin tool should be denied before workflow gate");
+        assert!(error
+            .to_string()
+            .contains("not enabled by the current --allowedTools setting"));
+    }
+
+    #[test]
+    fn workflow_gate_respects_required_permission_levels() {
+        let workspace = temporary_workdir();
+        initialize_workflow(&workspace).expect("workflow should initialize");
+        let executor = gate_executor_for(workspace);
+
+        for (tool_name, required_mode) in
+            GlobalToolRegistry::builtin().permission_specs(None)
+        {
+            let blocked = executor.workflow_gate_rejection(&tool_name).is_some();
+            if required_mode == PermissionMode::ReadOnly {
+                assert!(!blocked, "{tool_name} should not be blocked before approval");
+            } else {
+                assert!(
+                    blocked,
+                    "{tool_name} (required {required_mode:?}) should be blocked before approval"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn workflow_gate_blocks_non_read_only_tools_before_approval() {
+        let workspace = temporary_workdir();
+        initialize_workflow(&workspace).expect("workflow should initialize");
+        let mut executor = gate_executor_for(workspace.clone());
+
+        let write_target = workspace.join("blocked.txt");
+        let write_input = serde_json::to_string(&serde_json::json!({
+            "path": write_target,
+            "content": "blocked",
+        }))
+        .expect("tool input json should serialize");
+
+        let error = executor
+            .execute("write_file", &write_input)
+            .expect_err("write tools should be blocked before gate approval");
+        assert!(error.to_string().contains("workflow gate blocks tool execution"));
+
+        let edit_target = workspace.join("editable.txt");
+        fs::write(&edit_target, "before")
+            .expect("test fixture should be writable for setup");
+        let edit_input = serde_json::to_string(&serde_json::json!({
+            "path": edit_target,
+            "old_string": "before",
+            "new_string": "after",
+        }))
+        .expect("tool input json should serialize");
+
+        let error = executor
+            .execute("edit_file", &edit_input)
+            .expect_err("edit tools should be blocked before gate approval");
+        assert!(error.to_string().contains("workflow gate blocks tool execution"));
+
+        let error = executor
+            .execute("bash", r#"{"command":"echo blocked"}"#)
+            .expect_err("danger tools should be blocked before gate approval");
+        assert!(error.to_string().contains("workflow gate blocks tool execution"));
+    }
+
+    #[test]
+    fn workflow_gate_respects_plugin_required_permission_levels() {
+        let workspace = temporary_workdir();
+        initialize_workflow(&workspace).expect("workflow should initialize");
+        let cases = [
+            (PluginToolPermission::ReadOnly, false),
+            (PluginToolPermission::WorkspaceWrite, true),
+            (PluginToolPermission::DangerFullAccess, true),
+        ];
+
+        for (permission_mode, should_block) in cases {
+            let executor = gate_executor_for_plugin(workspace.clone(), permission_mode);
+            let blocked = executor.workflow_gate_rejection("plugin_echo").is_some();
+            assert_eq!(
+                blocked, should_block,
+                "plugin permission {permission_mode:?} should have blocked={should_block}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_gate_allows_read_only_tools_before_approval() {
+        let workspace = temporary_workdir();
+        initialize_workflow(&workspace).expect("workflow should initialize");
+        let mut executor = gate_executor_for(workspace.clone());
+
+        let target = workspace.join("allowed.txt");
+        fs::write(&target, "allowed by phase gate")
+            .expect("test fixture should be writable for setup");
+        let input = serde_json::to_string(&serde_json::json!({
+            "path": target,
+        }))
+        .expect("tool input json should serialize");
+
+        let output = executor
+            .execute("read_file", &input)
+            .expect("read-only tool should pass before gate approval");
+        assert!(output.contains("allowed by phase gate"));
+
+        let grep_input = serde_json::to_string(&serde_json::json!({
+            "path": workspace,
+            "pattern": "allowed by phase gate",
+        }))
+        .expect("tool input json should serialize");
+        let grep_output = executor
+            .execute("grep_search", &grep_input)
+            .expect("read-only search tool should pass before gate approval");
+        assert!(!grep_output.is_empty());
+
+        let glob_input = serde_json::to_string(&serde_json::json!({
+            "path": workspace,
+            "pattern": "allowed.txt",
+        }))
+        .expect("tool input json should serialize");
+        let glob_output = executor
+            .execute("glob_search", &glob_input)
+            .expect("glob search tool should pass before gate approval");
+        assert!(!glob_output.is_empty());
+    }
+
+    #[test]
+    fn allowed_tools_restricts_execution_before_workflow_gate() {
+        let workspace = temporary_workdir();
+        initialize_workflow(&workspace).expect("workflow should initialize");
+        let mut executor = CliToolExecutor::new(
+            Some(std::collections::BTreeSet::from([String::from("read_file")])),
+            false,
+            GlobalToolRegistry::builtin(),
+            workspace.clone(),
+        );
+
+        let target = workspace.join("blocked.txt");
+        let input = serde_json::to_string(&serde_json::json!({
+            "path": target,
+            "content": "blocked",
+        }))
+        .expect("tool input json should serialize");
+
+        let error = executor
+            .execute("write_file", &input)
+            .expect_err("disallowed tool should be denied before workflow gate");
+        assert!(error.to_string().contains("not enabled by the current --allowedTools setting"));
+    }
+
+    #[test]
+    fn workflow_gate_stops_blocking_after_all_phases_approved() {
+        let workspace = temporary_workdir();
+        initialize_workflow(&workspace).expect("workflow should initialize");
+        let snapshot = load_workflow_snapshot(&workspace).expect("snapshot should load");
+
+        for phase in snapshot.phases {
+            approve_workflow_gate(&workspace, Some(&phase.id), Some("ok"))
+                .expect("phase should advance when approved");
+        }
+
+        let mut executor = gate_executor_for(workspace);
+        let error = executor
+            .execute("nonexistent_tool", "{}")
+            .expect_err("unsupported tool should still fail after gates");
+        assert_eq!(
+            error.to_string(),
+            "unsupported tool: nonexistent_tool".to_string()
+        );
+    }
+
+    #[test]
+    fn workflow_gate_rejection_allows_unknown_tools_after_full_approval() {
+        let workspace = temporary_workdir();
+        initialize_workflow(&workspace).expect("workflow should initialize");
+        let snapshot = load_workflow_snapshot(&workspace).expect("snapshot should load");
+
+        for phase in snapshot.phases {
+            approve_workflow_gate(&workspace, Some(&phase.id), Some("approved"))
+                .expect("phase should be approved");
+        }
+
+        let executor = gate_executor_for(workspace);
+        assert!(
+            executor.workflow_gate_rejection("does_not_exist").is_none(),
+            "workflow gates should stop blocking unknown tools after all phases are approved"
+        );
     }
 
     #[test]
@@ -4451,6 +5157,7 @@ mod tests {
         assert!(help.contains("/init"));
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
+        assert!(help.contains("/workflow"));
         assert!(help.contains("/export [file]"));
         assert!(help.contains("/session [list|switch <session-id>]"));
         assert!(help.contains(
@@ -4559,6 +5266,9 @@ mod tests {
         print_help_to(&mut help).expect("help should render");
         let help = String::from_utf8(help).expect("help should be utf8");
         assert!(help.contains("claw init"));
+        assert!(help.contains("claw workflow init"));
+        assert!(help.contains("claw workflow status"));
+        assert!(help.contains("claw workflow config"));
         assert!(help.contains("claw agents"));
         assert!(help.contains("claw skills"));
         assert!(help.contains("claw /skills"));
